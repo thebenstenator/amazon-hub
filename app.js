@@ -55,7 +55,8 @@ function defaultState() {
       taxMode: 'flat',        // 'flat' | 'se'
       flatRate: 30,           // % of taxable profit
       incomeRate: 12,         // % federal+state income tax bracket, used with 'se'
-      mileageRates: { 2024: 0.67, 2025: 0.70, 2026: 0.725 }, // IRS business standard mileage rate
+      // IRS business standard mileage rate; 2026 rose mid-year (Notice 2026-10 update)
+      mileageRates: { 2024: 0.67, 2025: 0.70, 2026: 0.725, '2026-07-01': 0.76 },
       defaultAreaId: areaId,
       defaultVehicleId: vehicleId,
     },
@@ -117,11 +118,13 @@ function dayHours(d) {
   return m / 60;
 }
 
-function mileageRate(year) {
+// Rate keys are a year ("2026", effective Jan 1) or a mid-year change date ("2026-07-01").
+const rateKeyDate = (k) => (k.length === 4 ? `${k}-01-01` : k);
+function mileageRate(dateOrYear) {
+  const date = rateKeyDate(dateOrYear);
   const r = state.settings.mileageRates;
-  if (r[year] != null) return +r[year];
-  const known = Object.keys(r).sort();
-  const prior = known.filter((y) => y <= year);
+  const known = Object.keys(r).sort((a, b) => rateKeyDate(a).localeCompare(rateKeyDate(b)));
+  const prior = known.filter((k) => rateKeyDate(k) <= date);
   return +r[(prior.length ? prior : known).at(-1)] || 0;
 }
 
@@ -130,7 +133,9 @@ function estTax(taxable) {
   const s = state.settings;
   if (s.taxMode === 'flat') return taxable * s.flatRate / 100;
   const se = taxable * 0.9235 * 0.153; // self-employment tax (Social Security + Medicare)
-  return se + Math.max(0, taxable - se / 2) * s.incomeRate / 100;
+  // Income tax applies after deducting half the SE tax and the 20% qualified business income (QBI) deduction.
+  const qbi = 0.2 * Math.max(0, taxable - se / 2);
+  return se + Math.max(0, taxable - se / 2 - qbi) * s.incomeRate / 100;
 }
 
 // Business-use % for a vehicle in a year = delivery miles ÷ total miles driven.
@@ -171,7 +176,7 @@ function summarize(from, to, forceMethods) {
   const miles = sum(days, dayMiles);
   const hours = sum(days, dayHours);
   const workDays = new Set(days.map((d) => d.date)).size;
-  const mileageDeduction = sum(days, (d) => dayMiles(d) * mileageRate(d.date.slice(0, 4)));
+  const mileageDeduction = sum(days, (d) => dayMiles(d) * mileageRate(d.date));
   const carExps = exps.filter((e) => catOf(e.category).mileage);
   const vehicleExpFull = sum(carExps, (e) => e.amount);
   const vehicleExp = sum(carExps, bizAmount); // only the business-use share of car costs counts
@@ -182,7 +187,7 @@ function summarize(from, to, forceMethods) {
   // The IRS lets you pick standard mileage or actual expenses separately for each vehicle.
   const perVehicle = state.vehicles.map((v) => {
     const vDays = days.filter((d) => d.vehicleId === v.id);
-    const standard = sum(vDays, (d) => dayMiles(d) * mileageRate(d.date.slice(0, 4)));
+    const standard = sum(vDays, (d) => dayMiles(d) * mileageRate(d.date));
     const actual = sum(carExps.filter((e) => e.vehicleId === v.id), bizAmount);
     const pref = forceMethods?.[v.id] || v.deduction || state.settings.deduction;
     const method = pref === 'best' ? (standard >= actual ? 'standard' : 'actual') : pref;
@@ -300,7 +305,6 @@ function viewDash() {
   const [from, to, label] = periodRange();
   const s = summarize(from, to);
   const st = state.settings;
-  const rateLabel = ui.period === 'year' ? `$${mileageRate(ui.year)}/mi` : `$${mileageRate(curYear())}/mi`;
   const taxDesc = st.taxMode === 'flat' ? `${st.flatRate}% of taxable profit` : `15.3% self-employment + ${st.incomeRate}% income tax`;
 
   const stat = (lbl, val, show = true) => (show ? `<div class="stat"><span>${lbl}</span><b>${val}</b></div>` : '');
@@ -378,7 +382,7 @@ function viewDash() {
       <dl class="kv">
         <dt>Gross earnings</dt><dd>${money(s.gross)}</dd>
         ${s.perVehicle.map((x) => {
-          const std = `${num(x.miles)} mi × ${rateLabel} = ${money(x.standard)}`;
+          const std = `${num(x.miles)} mi × $${x.miles ? (x.standard / x.miles).toFixed(3).replace(/0$/, "") : "0"}/mi = ${money(x.standard)}`;
           const act = `business share of car costs = ${money(x.actual)}`;
           return `<dt>${esc(x.v.name)}: ${x.method === 'standard' ? 'standard mileage' : 'actual costs'}
               <small>${x.method === 'standard' ? std : act}</small>
@@ -547,10 +551,10 @@ function viewSettings() {
           ${[['best', 'Auto (larger)'], ['standard', 'Standard mileage'], ['actual', 'Actual expenses']].map(([v, l]) => `<option value="${v}" ${st.deduction === v ? 'selected' : ''}>${l}</option>`).join('')}
         </select>
       </div>
-      ${yearsList().map((y) => `
+      ${yearsList().flatMap((y) => [y, ...Object.keys(st.mileageRates).filter((k) => k.length > 4 && k.startsWith(y)).sort()]).map((k) => `
         <div class="field-row">
-          <label for="mr-${y}">IRS mileage rate ${y}<small>$ per business mile — check irs.gov</small></label>
-          <input id="mr-${y}" type="number" inputmode="decimal" step="0.005" data-mrate="${y}" value="${mileageRate(y)}">
+          <label for="mr-${k}">IRS mileage rate ${k.length === 4 ? k : `from ${fmtShort(k)}, ${k.slice(0, 4)}`}<small>$ per business mile — check irs.gov</small></label>
+          <input id="mr-${k}" type="number" inputmode="decimal" step="0.005" data-mrate="${k}" value="${mileageRate(k)}">
         </div>`).join('')}
       <div class="field-row">
         <label for="s-taxmode">Tax estimate<small>How tax set-aside is calculated</small></label>
@@ -568,7 +572,7 @@ function viewSettings() {
           <label for="s-inc">Income tax rate<small>Your federal bracket + state %</small></label>
           <input id="s-inc" type="number" inputmode="decimal" step="0.5" data-setting="incomeRate" value="${st.incomeRate}">
         </div>`}
-      <p class="hint">"Self-employment + bracket" adds the 15.3% Social Security/Medicare tax that 1099 workers pay to your income tax rate — usually more accurate than a flat %.</p>
+      <p class="hint">"Self-employment + bracket" = 15.3% Social Security/Medicare tax on 92.35% of profit, plus your income tax rate on what's left after half of that and the 20% small-business (QBI) deduction. Usually more accurate than a flat %.</p>
     </section>
 
     <section class="card">
