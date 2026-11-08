@@ -17,10 +17,21 @@ const CATS = [
   { id: 'registration', label: 'Registration & car fees', mileage: true },
   { id: 'tolls', label: 'Tolls & parking', mileage: false },
   { id: 'phone', label: 'Phone & data', mileage: false },
+  { id: 'subscriptions', label: 'Apps & subscriptions', mileage: false },
   { id: 'supplies', label: 'Supplies & equipment', mileage: false },
   { id: 'other', label: 'Other business cost', mileage: false },
 ];
 const catOf = (id) => CATS.find((c) => c.id === id) || CATS[CATS.length - 1];
+
+// Quick picks for common recurring business costs.
+const RECURRING_SUGGESTIONS = [
+  { name: 'Phone bill', category: 'phone', frequency: 'monthly', bizPct: 50, hint: 'Enter the full bill and the share you use for deliveries.' },
+  { name: 'Car insurance', category: 'insurance', frequency: 'monthly', hint: 'Split automatically by the vehicle’s business use.' },
+  { name: 'Registration', category: 'registration', frequency: 'yearly', hint: 'Split automatically by the vehicle’s business use.' },
+  { name: 'Apps & subscriptions', category: 'subscriptions', frequency: 'monthly', bizPct: 100, hint: 'Navigation, cloud storage, etc. Use the business share if you also use it personally.' },
+  { name: 'Car wash membership', category: 'carwash', frequency: 'monthly', hint: 'Split automatically by the vehicle’s business use.' },
+];
+const FREQS = { weekly: 'week', monthly: 'month', yearly: 'year' };
 
 /* ---------- small utils ---------- */
 const $ = (sel, el = document) => el.querySelector(sel);
@@ -64,6 +75,7 @@ function defaultState() {
     vehicles: [{ id: vehicleId, name: 'Car 1' }],
     days: [],
     expenses: [],
+    recurring: [], // { id, name, category, amount, bizPct, vehicleId, frequency, startDate, endDate, lastGenerated }
     taxPaid: {},
     lastBackup: null,
   };
@@ -83,6 +95,48 @@ function load() {
     if (raw) return normalize(JSON.parse(raw));
   } catch (err) { console.error(err); }
   return defaultState();
+}
+
+/* ---------- recurring costs ---------- */
+// Dates a recurring cost falls on, from its start through `through` (and its end date, if any).
+// Monthly/yearly keep the start date's day, clamped to short months (e.g. the 31st → Feb 28).
+function occurrenceDates(r, through) {
+  const out = [], s = fromISO(r.startDate), last = r.endDate && r.endDate < through ? r.endDate : through;
+  for (let i = 0; i < 1000; i++) {
+    let d;
+    if (r.frequency === 'weekly') d = addDays(r.startDate, 7 * i);
+    else {
+      const m = s.getMonth() + (r.frequency === 'yearly' ? 12 * i : i);
+      d = toISO(new Date(s.getFullYear(), m, Math.min(s.getDate(), new Date(s.getFullYear(), m + 1, 0).getDate())));
+    }
+    if (d > last) break;
+    out.push(d);
+  }
+  return out;
+}
+
+const recurringShare = (r) => (catOf(r.category).mileage ? 100 : r.bizPct ?? 100);
+const nextDue = (r) => occurrenceDates(r, addDays(todayISO(), 400)).find((d) => !r.lastGenerated || d > r.lastGenerated);
+
+// Add an expense for every occurrence that has come due since the last one we generated.
+// Generated expenses are ordinary costs (editable/deletable) and are never re-created.
+function materializeRecurring() {
+  let changed = false;
+  for (const r of state.recurring) {
+    for (const date of occurrenceDates(r, todayISO())) {
+      if (r.lastGenerated && date <= r.lastGenerated) continue;
+      const pct = recurringShare(r);
+      state.expenses.push({
+        id: uid(), date, category: r.category, amount: Math.round(r.amount * pct) / 100,
+        vehicleId: r.vehicleId || null, gallons: null, odometer: null,
+        notes: r.name + (pct < 100 ? ` (${pct}% of ${money(r.amount)})` : ''), recurringId: r.id,
+      });
+      r.lastGenerated = date;
+      changed = true;
+    }
+  }
+  if (changed) save();
+  return changed;
 }
 
 function save() {
@@ -469,13 +523,32 @@ function viewCosts() {
     if (e.notes) detail.push(e.notes);
     list += `
       <button class="list-row" data-action="edit-exp" data-id="${e.id}">
-        <span class="grow">${esc(catOf(e.category).label)}<small>${esc(detail.join(' · '))}</small></span>
+        <span class="grow">${esc(catOf(e.category).label)}${e.recurringId ? ' <span class="muted" title="Recurring">↻</span>' : ''}<small>${esc(detail.join(' · '))}</small></span>
         <span class="amt">${money(e.amount)}</span>
       </button>`;
   }
 
+  const recurringCard = `
+    <section class="card">
+      <h3>Recurring</h3>
+      ${state.recurring.length ? `<div class="list">${state.recurring.map((r) => {
+        const due = nextDue(r), pct = recurringShare(r);
+        const sub = [catOf(r.category).label];
+        if (r.vehicleId && vehicleById(r.vehicleId)) sub.push(vehicleName(r.vehicleId));
+        if (pct < 100) sub.push(`${pct}% business`);
+        sub.push(due ? `next ${fmtShort(due)}` : 'ended');
+        return `
+          <button class="list-row" data-action="edit-rec" data-id="${r.id}">
+            <span class="grow">${esc(r.name)}<small>${esc(sub.join(' · '))}</small></span>
+            <span class="amt">${money(r.amount)}<span class="muted"> /${FREQS[r.frequency]}</span></span>
+          </button>`;
+      }).join('')}</div>` : '<p class="hint" style="margin-top:0">Set up bills that repeat, like your phone or car insurance, and they’ll be added to your costs automatically.</p>'}
+      <button class="btn small" data-action="add-rec">+ Add recurring cost</button>
+    </section>`;
+
   return `
     <div class="controls"><span class="muted" style="flex:1">Costs for</span>${yearSelect()}</div>
+    ${recurringCard}
     ${byCat.length ? `
       <section class="card">
         <h3>${ui.year} by category</h3>
@@ -627,6 +700,8 @@ modalForm.addEventListener('submit', (e) => {
   modal.close(); save(); render();
 });
 modalForm.addEventListener('click', (e) => {
+  const sug = e.target.closest('[data-suggest]');
+  if (sug) return modalHandlers.onInput?.({ target: sug, type: 'suggest' });
   const b = e.target.closest('[data-modal]');
   if (!b) return;
   if (b.dataset.modal === 'cancel') modal.close();
@@ -768,6 +843,7 @@ function openExpenseForm(exp) {
         gallons: fd.category === 'fuel' ? numOrNull(fd.gallons) : null,
         odometer: fd.category === 'fuel' ? numOrNull(fd.odometer) : null,
         notes: (fd.notes || '').trim(),
+        ...(e.recurringId ? { recurringId: e.recurringId } : {}),
       };
       if (!rec.date) { alert('Please pick a date.'); return false; }
       if (!rec.amount) { alert('Please enter an amount.'); return false; }
@@ -780,6 +856,73 @@ function openExpenseForm(exp) {
     },
     onDelete: isNew ? null : () => { state.expenses = state.expenses.filter((x) => x.id !== e.id); },
   });
+}
+
+/* ---------- recurring cost ---------- */
+function openRecurringForm(rec) {
+  const isNew = !rec;
+  const r = rec || { name: '', category: 'phone', amount: null, bizPct: 100, vehicleId: null, frequency: 'monthly', startDate: todayISO(), endDate: '' };
+  const v = (x) => (x == null ? '' : x);
+  const vehicles = withCurrent(activeVehicles(), state.vehicles, r.vehicleId);
+
+  const body = `
+    ${isNew ? `<div class="chips" style="margin-bottom:12px">${RECURRING_SUGGESTIONS.map((s, i) => `<button type="button" class="chip-btn" data-suggest="${i}">${esc(s.name)}</button>`).join('')}</div>` : ''}
+    ${field('Name', `<input type="text" name="name" required value="${esc(r.name)}" placeholder="e.g. Phone bill">`)}
+    <div class="grid2">
+      ${field('Amount $', `<input type="number" name="amount" inputmode="decimal" step="0.01" min="0" value="${v(r.amount)}" placeholder="0.00">`)}
+      ${field('Every', `<select name="frequency">${Object.entries(FREQS).map(([k, l]) => `<option value="${k}" ${r.frequency === k ? 'selected' : ''}>${l}</option>`).join('')}</select>`)}
+    </div>
+    ${field('Category', `<select name="category">${CATS.map((c) => `<option value="${c.id}" ${c.id === r.category ? 'selected' : ''}>${esc(c.label)}</option>`).join('')}</select>`)}
+    <div class="rec-car">${field('Vehicle', `<select name="vehicleId"><option value="">— Pick a vehicle —</option>${options(vehicles, r.vehicleId)}</select>`)}</div>
+    <div class="rec-pct">${field('Business use %', `<input type="number" name="bizPct" inputmode="decimal" step="1" min="0" max="100" value="${v(r.bizPct ?? 100)}">`)}</div>
+    <div class="grid2">
+      ${field(isNew ? 'First charge' : 'Started', `<input type="date" name="startDate" value="${r.startDate}" ${isNew ? '' : 'disabled'}>`)}
+      ${field('Ends (optional)', `<input type="date" name="endDate" value="${v(r.endDate)}">`)}
+    </div>
+    <p class="hint" id="rec-hint"></p>`;
+
+  openModal(isNew ? 'Add recurring cost' : 'Edit recurring cost', body, {
+    onInput(e) {
+      const f = modalForm.elements;
+      const sug = e.target?.dataset?.suggest != null ? RECURRING_SUGGESTIONS[+e.target.dataset.suggest] : null;
+      if (sug) {
+        f.name.value = sug.name; f.category.value = sug.category; f.frequency.value = sug.frequency;
+        if (sug.bizPct != null) f.bizPct.value = sug.bizPct;
+        f.amount.focus();
+      }
+      const cat = catOf(f.category.value);
+      modalForm.querySelector('.rec-car').hidden = !cat.mileage;
+      modalForm.querySelector('.rec-pct').hidden = cat.mileage;
+      const share = cat.mileage ? 100 : +f.bizPct.value || 0;
+      const amt = +f.amount.value || 0;
+      const past = isNew && f.startDate.value && f.startDate.value <= todayISO()
+        ? occurrenceDates({ startDate: f.startDate.value, frequency: f.frequency.value, endDate: f.endDate.value }, todayISO()).length : 0;
+      $('#rec-hint').textContent = [
+        sug?.hint || (cat.mileage ? 'Car cost: split automatically by the vehicle’s business use.' : ''),
+        !cat.mileage && share < 100 && amt ? `Counts ${money(amt * share / 100)} of each ${money(amt)} charge.` : '',
+        past ? `${past} charge${past > 1 ? 's' : ''} up to today will be added now.` : '',
+        isNew ? '' : 'Changes apply to future charges; costs already added stay as they are.',
+      ].filter(Boolean).join(' ');
+    },
+    onSubmit(fd) {
+      const rec2 = {
+        ...r, id: r.id || uid(),
+        name: (fd.name || '').trim(), category: fd.category, amount: +fd.amount || 0,
+        bizPct: Math.min(100, Math.max(0, numOrNull(fd.bizPct) ?? 100)),
+        vehicleId: catOf(fd.category).mileage ? fd.vehicleId || null : null,
+        frequency: fd.frequency, startDate: isNew ? fd.startDate : r.startDate, endDate: fd.endDate || '',
+      };
+      if (!rec2.name) { alert('Please enter a name.'); return false; }
+      if (!rec2.amount) { alert('Please enter an amount.'); return false; }
+      if (!rec2.startDate) { alert('Please pick the date of the first charge.'); return false; }
+      if (catOf(rec2.category).mileage && !rec2.vehicleId) { alert('Pick which vehicle this is for. Car costs are split by that vehicle’s business use.'); return false; }
+      const i = state.recurring.findIndex((x) => x.id === rec2.id);
+      if (i >= 0) state.recurring[i] = rec2; else state.recurring.push(rec2);
+      materializeRecurring();
+    },
+    onDelete: isNew ? null : () => { state.recurring = state.recurring.filter((x) => x.id !== r.id); },
+  });
+  modalHandlers.deleteMsg = 'Stop this recurring cost? Costs already added will stay in your list.';
 }
 
 /* ---------- areas & vehicles ---------- */
@@ -914,6 +1057,8 @@ document.addEventListener('click', async (e) => {
     case 'edit-day': return openDayForm(state.days.find((d) => d.id === id));
     case 'add-exp': return openExpenseForm(null);
     case 'edit-exp': return openExpenseForm(state.expenses.find((x) => x.id === id));
+    case 'add-rec': return openRecurringForm(null);
+    case 'edit-rec': return openRecurringForm(state.recurring.find((x) => x.id === id));
     case 'add-area': return openAreaForm(null);
     case 'edit-area': return openAreaForm(areaById(id));
     case 'add-vehicle': return openVehicleForm(null);
@@ -968,11 +1113,13 @@ document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible' && todayISO() !== lastRenderDay) {
     lastRenderDay = todayISO();
     ui.weekOf = weekStart(lastRenderDay);
+    materializeRecurring();
     render();
   }
 });
 
 /* ---------- boot ---------- */
+materializeRecurring();
 render();
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(console.error);
 navigator.storage?.persist?.(); // ask the browser not to evict our data
