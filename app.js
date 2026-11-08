@@ -162,7 +162,8 @@ function useFor(vehicleId, year) {
 const bizPct = (e) => (e.vehicleId && catOf(e.category).mileage && vehicleById(e.vehicleId) ? useFor(e.vehicleId, e.date.slice(0, 4)).pct : 1);
 const bizAmount = (e) => (e.amount || 0) * bizPct(e);
 
-function summarize(from, to, forceMethod) {
+// `forceMethods` = { vehicleId: 'standard' | 'actual' } — used so quarters follow the full-year choice.
+function summarize(from, to, forceMethods) {
   const days = state.days.filter((d) => d.date >= from && d.date <= to);
   const exps = state.expenses.filter((e) => e.date >= from && e.date <= to);
   const gross = sum(days, dayPay);
@@ -177,17 +178,28 @@ function summarize(from, to, forceMethod) {
   const personalCarExp = vehicleExpFull - vehicleExp;
   const otherExp = sum(exps.filter((e) => !catOf(e.category).mileage), (e) => e.amount);
   const totalExp = vehicleExp + otherExp;
-  const standard = mileageDeduction + otherExp;
-  const actual = totalExp;
-  const pref = forceMethod || state.settings.deduction;
-  const method = pref === 'best' ? (standard >= actual ? 'standard' : 'actual') : pref;
-  const deduction = method === 'standard' ? standard : actual;
+
+  // The IRS lets you pick standard mileage or actual expenses separately for each vehicle.
+  const perVehicle = state.vehicles.map((v) => {
+    const vDays = days.filter((d) => d.vehicleId === v.id);
+    const standard = sum(vDays, (d) => dayMiles(d) * mileageRate(d.date.slice(0, 4)));
+    const actual = sum(carExps.filter((e) => e.vehicleId === v.id), bizAmount);
+    const pref = forceMethods?.[v.id] || v.deduction || state.settings.deduction;
+    const method = pref === 'best' ? (standard >= actual ? 'standard' : 'actual') : pref;
+    return { v, miles: sum(vDays, dayMiles), standard, actual, method, deduction: method === 'standard' ? standard : actual };
+  }).filter((x) => x.miles || x.actual);
+  // Car costs not tied to any vehicle can only be deducted as actual expenses.
+  const unassignedCarExp = sum(carExps.filter((e) => !e.vehicleId || !vehicleById(e.vehicleId)), bizAmount);
+
+  const standard = mileageDeduction + otherExp; // every car on standard mileage, for comparison
+  const actual = totalExp;                      // every car on actual expenses, for comparison
+  const deduction = sum(perVehicle, (x) => x.deduction) + unassignedCarExp + otherExp;
   const taxable = gross - deduction;
   const tax = estTax(taxable);
   const cashProfit = gross - totalExp;
   return {
     days, exps, gross, packages, miles, hours, workDays, mileageDeduction, vehicleExp, personalCarExp, otherExp, totalExp,
-    standard, actual, method, deduction, taxable, tax, cashProfit, takeHome: cashProfit - tax,
+    standard, actual, perVehicle, unassignedCarExp, deduction, taxable, tax, cashProfit, takeHome: cashProfit - tax,
   };
 }
 
@@ -313,9 +325,10 @@ function viewDash() {
 
   let quarterCard = '';
   if (ui.period === 'year') {
-    const annualMethod = summarize(`${ui.year}-01-01`, `${ui.year}-12-31`).method;
+    const annual = summarize(`${ui.year}-01-01`, `${ui.year}-12-31`);
+    const annualMethods = Object.fromEntries(annual.perVehicle.map((x) => [x.v.id, x.method]));
     const paid = state.taxPaid[ui.year] || [];
-    const qs = quarters(ui.year).map((q) => summarize(q.from, q.to, annualMethod).tax);
+    const qs = quarters(ui.year).map((q) => summarize(q.from, q.to, annualMethods).tax);
     const totalEst = sum(qs, (x) => x), totalPaid = sum(paid, (x) => x);
     quarterCard = `
       <section class="card">
@@ -364,14 +377,22 @@ function viewDash() {
       <h3>Taxes <small>(estimate)</small></h3>
       <dl class="kv">
         <dt>Gross earnings</dt><dd>${money(s.gross)}</dd>
-        <dt>Standard mileage method<small>${num(s.miles)} mi × ${rateLabel} + ${money(s.otherExp)} other costs</small></dt>
-          <dd class="${s.method === 'standard' ? 'pick' : 'dim'}">−${money(s.standard)}</dd>
-        <dt>Actual expense method<small>business share of your costs${s.personalCarExp > 0.005 ? ` (${money(s.personalCarExp)} personal car use left out)` : ''}</small></dt>
-          <dd class="${s.method === 'actual' ? 'pick' : 'dim'}">−${money(s.actual)}</dd>
+        ${s.perVehicle.map((x) => {
+          const std = `${num(x.miles)} mi × ${rateLabel} = ${money(x.standard)}`;
+          const act = `business share of car costs = ${money(x.actual)}`;
+          return `<dt>${esc(x.v.name)}: ${x.method === 'standard' ? 'standard mileage' : 'actual costs'}
+              <small>${x.method === 'standard' ? std : act}</small>
+              <small>vs. ${x.method === 'standard' ? act : std}</small></dt>
+            <dd>−${money(x.deduction)}</dd>`;
+        }).join('')}
+        ${s.unassignedCarExp > 0.005 ? `<dt>Car costs with no vehicle<small>actual costs only</small></dt><dd>−${money(s.unassignedCarExp)}</dd>` : ''}
+        <dt>Other business costs<small>phone, supplies, tolls &amp; parking…</small></dt><dd>−${money(s.otherExp)}</dd>
+        <dt class="total">Total deduction</dt><dd class="total">−${money(s.deduction)}</dd>
+        ${s.personalCarExp > 0.005 ? `<dt>Personal car use left out<small>not deductible</small></dt><dd class="dim">${money(s.personalCarExp)}</dd>` : ''}
         <dt class="total">Taxable profit</dt><dd class="total">${money(s.taxable)}</dd>
         <dt>Estimated tax<small>${taxDesc}</small></dt><dd>${money(s.tax)}</dd>
       </dl>
-      <p class="hint">${st.deduction === 'best' ? 'Using whichever deduction is larger. ' : ''}Note: to ever use the standard mileage rate for a car, the IRS requires choosing it in the first year you use that car for business. This is an estimate, not tax advice.</p>
+      <p class="hint">Each vehicle gets its own method${st.deduction === 'best' ? ' (whichever is larger, unless you lock one in Settings → Vehicles)' : ''}. IRS rules: to ever use standard mileage for a car you must use it the first year the car is used for business, and once you take actual costs with depreciation you can't switch that car back. Once you've filed, lock each car's method. This is an estimate, not tax advice.</p>
     </section>
 
     ${quarterCard}
@@ -521,7 +542,7 @@ function viewSettings() {
     <section class="card">
       <h3>Taxes</h3>
       <div class="field-row">
-        <label for="s-deduction">Car deduction<small>How miles &amp; car costs are deducted</small></label>
+        <label for="s-deduction">Car deduction<small>Decided per vehicle; lock one under Vehicles</small></label>
         <select id="s-deduction" data-setting="deduction">
           ${[['best', 'Auto (larger)'], ['standard', 'Standard mileage'], ['actual', 'Actual expenses']].map(([v, l]) => `<option value="${v}" ${st.deduction === v ? 'selected' : ''}>${l}</option>`).join('')}
         </select>
@@ -746,6 +767,9 @@ function openExpenseForm(exp) {
       };
       if (!rec.date) { alert('Please pick a date.'); return false; }
       if (!rec.amount) { alert('Please enter an amount.'); return false; }
+      if (catOf(rec.category).mileage && !rec.vehicleId) {
+        alert('Pick which vehicle this was for. Car costs are split by that vehicle’s business use.'); return false;
+      }
       const i = state.expenses.findIndex((x) => x.id === rec.id);
       if (i >= 0) state.expenses[i] = rec; else state.expenses.push(rec);
       ui.year = rec.date.slice(0, 4);
@@ -784,12 +808,15 @@ function openVehicleForm(veh) {
     ${field(`Odometer on Jan 1, ${y} (optional)`, `<input type="number" name="startOdo" inputmode="decimal" step="0.1" min="0" value="${v.startOdo?.[y] ?? ''}" placeholder="Makes business-use % more accurate">`)}
     ${field(`Business use % for ${y} (optional)`, `<input type="number" name="usePct" inputmode="decimal" step="0.1" min="0" max="100" value="${v.usePct?.[y] ?? ''}" placeholder="${use ? `Calculated: ${num(use.calc * 100, 1)}%` : 'Leave blank to calculate'}">`)}
     <p class="hint" style="margin-top:-4px">Leave blank and the app calculates it from your odometer readings${use ? ` (${num(use.business)} delivery mi of ${num(use.total)} total so far)` : ''}. Only fill it in if you keep a separate mileage record.</p>
+    ${field('Tax deduction method for this vehicle', `<select name="deduction">
+      ${[['', 'Follow tax setting'], ['standard', 'Lock: standard mileage'], ['actual', 'Lock: actual costs']].map(([val, l]) => `<option value="${val}" ${(v.deduction || '') === val ? 'selected' : ''}>${l}</option>`).join('')}
+    </select>`)}
     ${field('Use as default for new days', `<input type="checkbox" name="isDefault" ${state.settings.defaultVehicleId === v.id ? 'checked' : ''}>`, 'check')}`, {
     onSubmit(fd) {
       if (!fd.name.trim()) { alert('Please enter a name.'); return false; }
       const pct = numOrNull(fd.usePct);
       if (pct != null && (pct < 0 || pct > 100)) { alert('Business use % must be between 0 and 100.'); return false; }
-      const rec = { ...v, id: v.id || uid(), name: fd.name.trim(), startOdo: setYear(v.startOdo, numOrNull(fd.startOdo)), usePct: setYear(v.usePct, pct) };
+      const rec = { ...v, id: v.id || uid(), name: fd.name.trim(), startOdo: setYear(v.startOdo, numOrNull(fd.startOdo)), usePct: setYear(v.usePct, pct), deduction: fd.deduction || null };
       const i = state.vehicles.findIndex((x) => x.id === rec.id);
       if (i >= 0) state.vehicles[i] = rec; else state.vehicles.push(rec);
       if (fd.isDefault) state.settings.defaultVehicleId = rec.id;
