@@ -1,6 +1,6 @@
 // Offline support: serve the app from cache, refresh the cache in the background.
 // Bump CACHE when shipping changes so old caches get cleaned up.
-const CACHE = 'hubtracker-v5';
+const CACHE = 'hubtracker-v6';
 const ASSETS = [
   './',
   './index.html',

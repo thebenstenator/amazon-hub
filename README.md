@@ -28,7 +28,7 @@ The data lives only in the browser on that device. Use **Settings → Back up** 
 **Restore backup** loads that file on a new phone. You can also export CSVs for a tax preparer.
 
 ## Recurring costs
-On the Costs tab, set up bills that repeat (weekly, monthly or yearly), such as a phone bill or car insurance. Quick picks fill in common ones.
+On the Costs tab, set up bills that repeat on any interval (every N weeks, months or years), such as a phone bill or car insurance. Quick picks fill in common ones.
 Each time a charge comes due, the app adds it as a normal cost marked ↻. A start date in the past backfills every charge up to today.
 Non-car costs take a business-use % (e.g. 50% of a phone bill). Car costs are split automatically by the vehicle's business use.
 Editing or stopping a recurring cost only affects future charges.
