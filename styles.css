@@ -222,6 +222,22 @@ dialog::backdrop { background: rgba(0,0,0,.45); }
   display: flex; justify-content: space-around; text-align: center; font-size: 13px; color: var(--muted);
 }
 .preview b { display: block; font-size: 18px; color: var(--text); }
-.modal-actions { display: flex; gap: 8px; align-items: center; margin-top: 6px; }
+/* Save bar stays pinned to the bottom of the form while it scrolls. */
+.modal-actions {
+  display: flex; gap: 8px; align-items: center;
+  position: sticky; bottom: calc(-16px - env(safe-area-inset-bottom));
+  margin: 6px -16px calc(-16px - env(safe-area-inset-bottom));
+  padding: 10px 16px calc(10px + env(safe-area-inset-bottom));
+  background: var(--card); border-top: 1px solid var(--line);
+}
+details.more { border-top: 1px solid var(--line); margin-bottom: 8px; }
+details.more summary {
+  list-style: none; cursor: pointer; padding: 12px 0; font-weight: 600;
+  display: flex; align-items: baseline; gap: 8px;
+}
+details.more summary::-webkit-details-marker { display: none; }
+details.more summary::before { content: "▸"; color: var(--muted); transition: transform .15s; }
+details.more[open] summary::before { transform: rotate(90deg); }
+details.more summary .muted { font-weight: normal; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .modal-actions .spacer { flex: 1; }
 [hidden] { display: none !important; }

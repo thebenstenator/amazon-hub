@@ -679,7 +679,7 @@ let modalHandlers = {};
 
 function openModal(title, body, { onSubmit, onDelete, onInput } = {}) {
   modalForm.innerHTML = `
-    <h2>${esc(title)}</h2>
+    <h2 id="modal-title">${esc(title)}</h2>
     ${body}
     <div class="modal-actions">
       ${onDelete ? '<button type="button" class="btn danger" data-modal="delete">Delete</button>' : ''}
@@ -731,32 +731,40 @@ function openDayForm(entry) {
     d = { date, areaId, rate: areaById(areaId)?.rate ?? 0, vehicleId, packages: null, bonus: null, odoStart: suggestOdo(vehicleId, date), odoEnd: null, startTime: '', endTime: '', notes: '' };
   }
   const v = (x) => (x == null ? '' : x);
+  const dayTitle = (date) => (isNew ? 'Log ' : '') + fmtLong(date);
+  // Open "More details" straight away if this day uses anything in it.
+  const usesExtras = d.bonus || d.notes || d.startTime || d.endTime
+    || (d.areaId !== st.defaultAreaId && activeAreas().length > 1)
+    || (areaById(d.areaId) && +d.rate !== +areaById(d.areaId).rate);
 
   const body = `
-    ${field('Date', `<input type="date" name="date" required value="${d.date}">`)}
-    <div class="grid2">
-      ${field('Packages delivered', `<input type="number" name="packages" inputmode="numeric" min="0" step="1" value="${v(d.packages)}" placeholder="0" ${isNew ? 'autofocus' : ''}>`)}
-      ${field('Bonus / adjustment $', `<input type="number" name="bonus" inputmode="decimal" step="0.01" value="${v(d.bonus || null)}" placeholder="0.00">`)}
-    </div>
-    <div class="grid2">
-      ${field('Area', `<select name="areaId">${options(withCurrent(activeAreas(), state.areas, d.areaId), d.areaId)}</select>`)}
-      ${field('Rate $ / package', `<input type="number" name="rate" inputmode="decimal" step="0.01" min="0" value="${v(d.rate)}">`)}
-    </div>
+    ${field('Packages delivered', `<input type="number" name="packages" inputmode="numeric" min="0" step="1" value="${v(d.packages)}" placeholder="0" ${isNew ? 'autofocus' : ''}>`)}
     ${field('Vehicle', `<select name="vehicleId">${options(withCurrent(activeVehicles(), state.vehicles, d.vehicleId), d.vehicleId)}</select>`)}
     <div class="grid2">
       ${field('Odometer start', `<input type="number" name="odoStart" inputmode="decimal" step="0.1" min="0" value="${v(d.odoStart)}">`)}
       ${field('Odometer end', `<input type="number" name="odoEnd" inputmode="decimal" step="0.1" min="0" value="${v(d.odoEnd)}">`)}
     </div>
-    <div class="grid2">
-      ${field('Start time (optional)', `<input type="time" name="startTime" value="${v(d.startTime)}">`)}
-      ${field('End time (optional)', `<input type="time" name="endTime" value="${v(d.endTime)}">`)}
-    </div>
-    ${field('Notes', `<textarea name="notes" rows="2" placeholder="Route, weather, issues…">${esc(d.notes)}</textarea>`)}
-    <div class="preview" id="day-preview"></div>`;
+    <div class="preview" id="day-preview"></div>
+    <details class="more" ${usesExtras ? 'open' : ''}>
+      <summary>More details <span class="muted" id="more-sum"></span></summary>
+      ${field('Date', `<input type="date" name="date" required value="${d.date}">`)}
+      <div class="grid2">
+        ${field('Area', `<select name="areaId">${options(withCurrent(activeAreas(), state.areas, d.areaId), d.areaId)}</select>`)}
+        ${field('Rate $ / package', `<input type="number" name="rate" inputmode="decimal" step="0.01" min="0" value="${v(d.rate)}">`)}
+      </div>
+      ${field('Bonus / adjustment $', `<input type="number" name="bonus" inputmode="decimal" step="0.01" value="${v(d.bonus || null)}" placeholder="0.00">`)}
+      <div class="grid2">
+        ${field('Start time', `<input type="time" name="startTime" value="${v(d.startTime)}">`)}
+        ${field('End time', `<input type="time" name="endTime" value="${v(d.endTime)}">`)}
+      </div>
+      ${field('Notes', `<textarea name="notes" rows="2" placeholder="Route, weather, issues…">${esc(d.notes)}</textarea>`)}
+    </details>`;
 
-  openModal(isNew ? 'Log a day' : fmtLong(d.date), body, {
+  openModal(dayTitle(d.date), body, {
     onInput(e) {
       const f = modalForm.elements;
+      if (f.date.value) $('#modal-title').textContent = dayTitle(f.date.value);
+      $('#more-sum').textContent = [fmtShort(f.date.value || d.date), areaName(f.areaId.value), money(+f.rate.value || 0) + '/pkg', +f.bonus.value ? '+' + money(+f.bonus.value) : ''].filter(Boolean).join(' · ');
       if (e.type === 'change' && e.target.name === 'areaId') f.rate.value = areaById(f.areaId.value)?.rate ?? '';
       if (e.type === 'change' && isNew && (e.target.name === 'vehicleId' || e.target.name === 'date')) {
         f.odoStart.value = suggestOdo(f.vehicleId.value, f.date.value, d.id) ?? '';
